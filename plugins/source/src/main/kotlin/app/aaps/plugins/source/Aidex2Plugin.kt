@@ -34,7 +34,9 @@ import javax.inject.Singleton
 class Aidex2Plugin @Inject constructor(
     rh: ResourceHelper,
     aapsLogger: AAPSLogger,
-    preferences: Preferences
+    preferences: Preferences,
+    private val context: Context,
+    private val aidex2BroadcastReceiver: Aidex2BroadcastReceiver
 ) : AbstractBgSourcePlugin(
     PluginDescription()
         .mainType(PluginType.BGSOURCE)
@@ -47,6 +49,18 @@ class Aidex2Plugin @Inject constructor(
     ownPreferences = listOf(Aidex2LongKey::class.java),
     aapsLogger, rh, preferences
 ), BgSource {
+
+    override fun onStart() {
+        super.onStart()
+        aidex2BroadcastReceiver.register(context)
+        aapsLogger.debug(LTag.BGSOURCE, "Aidex2Plugin: 启动，注册动态广播接收器")
+    }
+
+    override fun onStop() {
+        super.onStop()
+        aidex2BroadcastReceiver.unregister(context)
+        aapsLogger.debug(LTag.BGSOURCE, "Aidex2Plugin: 停止，注销动态广播接收器")
+    }
 
     class Aidex2Worker(
         context: Context,
