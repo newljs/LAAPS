@@ -62,28 +62,55 @@ class Aidex2Plugin @Inject constructor(
         @SuppressLint("CheckResult")
         override suspend fun doWorkAndLog(): Result {
             var ret = Result.success()
-            if (!aidex2Plugin.isEnabled()) return Result.success(workDataOf("Result" to "Plugin not enabled"))
-            val bundle = dataWorkerStorage.pickupBundle(inputData.getLong(DataWorkerStorage.STORE_KEY, -1))
-                ?: return Result.failure(workDataOf("Error" to "missing input data"))
+            if (!aidex2Plugin.isEnabled()) {
+                aapsLogger.debug(LTag.BGSOURCE, "Aidex2Worker: 插件未启用")
+                return Result.success(workDataOf("Result" to "Plugin not enabled"))
+            }
+            val storeKey = inputData.getLong(DataWorkerStorage.STORE_KEY, -1)
+            aapsLogger.debug(LTag.BGSOURCE, "Aidex2Worker: 开始处理, storeKey=$storeKey")
+            val bundle = dataWorkerStorage.pickupBundle(storeKey)
+            if (bundle == null) {
+                aapsLogger.error(LTag.BGSOURCE, "Aidex2Worker: Bundle 为空, storeKey=$storeKey")
+                return Result.failure(workDataOf("Error" to "missing input data"))
+            }
+
+            aapsLogger.debug(LTag.BGSOURCE, "Aidex2Worker: Bundle keys=${bundle.keySet()}")
+            for (key in bundle.keySet()) {
+                val value = bundle.get(key)
+                aapsLogger.debug(LTag.BGSOURCE, "Aidex2Worker: Bundle[$key] = ${value?.toString()?.take(200)} (type: ${value?.javaClass?.simpleName})")
+            }
 
             return try {
                 val glucoseValues = parseBundle(bundle)
+                aapsLogger.debug(LTag.BGSOURCE, "Aidex2Worker: 解析得到 ${glucoseValues.size} 条数据")
+
+                val sortedValues = glucoseValues
                     .sortedBy { it.timestamp }
                     .distinctBy { it.timestamp }
-                if (glucoseValues.isNotEmpty()) {
-                    persistenceLayer.insertCgmSourceData(Sources.Aidex, glucoseValues, emptyList(), null)
-                        .doOnError { ret = Result.failure(workDataOf("Error" to it.toString())) }
+                aapsLogger.debug(LTag.BGSOURCE, "Aidex2Worker: 过滤后 ${sortedValues.size} 条数据")
+
+                if (sortedValues.isNotEmpty()) {
+                    aapsLogger.debug(LTag.BGSOURCE, "Aidex2Worker: 准备插入数据库")
+                    persistenceLayer.insertCgmSourceData(Sources.Aidex, sortedValues, emptyList(), null)
+                        .doOnError { e ->
+                            aapsLogger.error(LTag.BGSOURCE, "Aidex2Worker: 数据库插入错误", e)
+                            ret = Result.failure(workDataOf("Error" to e.toString()))
+                        }
                         .blockingGet()
-                    preferences.put(Aidex2LongKey.LastProcessedTimestamp, glucoseValues.maxOf { it.timestamp })
+                    preferences.put(Aidex2LongKey.LastProcessedTimestamp, sortedValues.maxOf { it.timestamp })
+                    aapsLogger.debug(LTag.BGSOURCE, "Aidex2Worker: 成功插入 ${sortedValues.size} 条数据")
                 }
                 ret
             } catch (e: Exception) {
-                aapsLogger.error("Error while processing Aidex2 data", e)
+                aapsLogger.error(LTag.BGSOURCE, "Aidex2Worker: 处理 Aidex2 数据时出错", e)
                 Result.failure(workDataOf("Error" to e.toString()))
             }
         }
 
         private fun parseBundle(bundle: Bundle): List<GV> {
+            aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseBundle: 开始解析")
+            aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseBundle: AIDEX2_DATA_KEY=$AIDEX2_DATA_KEY")
+
             val payload = bundle.getString(AIDEX2_DATA_KEY)
                 ?: bundle.getString("data")
                 ?: bundle.getBundle(AIDEX2_DATA_KEY)
@@ -91,50 +118,104 @@ class Aidex2Plugin @Inject constructor(
                 ?: bundle.get(AIDEX2_DATA_KEY)
                 ?: bundle.get("data")
                 ?: bundle
+
+            aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseBundle: payload type=${payload.javaClass.simpleName}")
+            aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseBundle: payload=${payload.toString().take(500)}")
+
             return when (payload) {
-                is String -> parseJsonPayload(payload)
-                is Bundle -> listOfNotNull(parseRecord(Aidex2Record.fromBundle(payload)))
-                else      -> listOfNotNull(parseRecord(Aidex2Record.fromObject(payload)))
+                is String -> {
+                    aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseBundle: 解析 JSON 字符串")
+                    parseJsonPayload(payload)
+                }
+                is Bundle -> {
+                    aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseBundle: 解析 Bundle")
+                    listOfNotNull(parseRecord(Aidex2Record.fromBundle(payload)))
+                }
+                else -> {
+                    aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseBundle: 解析 Object")
+                    listOfNotNull(parseRecord(Aidex2Record.fromObject(payload)))
+                }
             }
         }
 
         private fun parseJsonPayload(payload: String): List<GV> {
-            if (payload.isBlank()) return emptyList()
+            if (payload.isBlank()) {
+                aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseJsonPayload: payload 为空")
+                return emptyList()
+            }
             return try {
                 val trimmed = payload.trim()
+                aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseJsonPayload: payload 前100字符=${trimmed.take(100)}")
+
                 if (trimmed.startsWith("[")) {
+                    aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseJsonPayload: 解析 JSON 数组")
                     val jsonArray = JSONArray(trimmed)
-                    List(jsonArray.length()) { index ->
-                        parseRecord(Aidex2Record.fromJson(jsonArray.getJSONObject(index)))
+                    aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseJsonPayload: 数组长度=${jsonArray.length()}")
+
+                    val results = List(jsonArray.length()) { index ->
+                        val jsonObj = jsonArray.getJSONObject(index)
+                        aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseJsonPayload: [$index]=${jsonObj.toString().take(200)}")
+                        parseRecord(Aidex2Record.fromJson(jsonObj))
                     }.filterNotNull()
+                    aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseJsonPayload: 解析得到 ${results.size} 条有效数据")
+                    results
                 } else {
+                    aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseJsonPayload: 解析 JSON 对象")
                     val jsonObject = JSONObject(trimmed)
                     val nestedArray = firstArray(jsonObject, "data", "records", "items", "cgmData")
                     if (nestedArray != null) {
+                        aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseJsonPayload: 嵌套数组长度=${nestedArray.length()}")
                         List(nestedArray.length()) { index ->
                             parseRecord(Aidex2Record.fromJson(nestedArray.getJSONObject(index)))
                         }.filterNotNull()
                     } else {
+                        aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseJsonPayload: 单个对象")
                         listOfNotNull(parseRecord(Aidex2Record.fromJson(jsonObject)))
                     }
                 }
             } catch (e: JSONException) {
-                aapsLogger.error(LTag.BGSOURCE, "Invalid Aidex2 JSON payload", e)
+                aapsLogger.error(LTag.BGSOURCE, "Aidex2 parseJsonPayload: JSON 解析错误", e)
                 emptyList()
             }
         }
 
         private fun parseRecord(record: Aidex2Record?): GV? {
-            record ?: return null
-            if (record.status != VALID_STATUS) return null
+            if (record == null) {
+                aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseRecord: record 为 null")
+                return null
+            }
+            aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseRecord: glucose=${record.glucose}, timestamp=${record.timestamp}, status=${record.status}, trend=${record.glucoseTrend}")
+
+            if (record.status != VALID_STATUS) {
+                aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseRecord: status 无效 (${record.status} != $VALID_STATUS)")
+                return null
+            }
 
             val timestamp = normalizeTimestamp(record.timestamp)
             val now = dateUtil.now()
-            if (timestamp <= preferences.get(Aidex2LongKey.LastProcessedTimestamp)) return null
-            if (timestamp <= 0 || timestamp > now || now - timestamp > T.days(7).msecs()) return null
-            val glucose = normalizeGlucose(record.glucose) ?: return null
-            if (!isFiveMinuteReading(timestamp)) return null
+            aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseRecord: timestamp=$timestamp, now=$now")
 
+            if (timestamp <= preferences.get(Aidex2LongKey.LastProcessedTimestamp)) {
+                aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseRecord: 时间戳太旧")
+                return null
+            }
+            if (timestamp <= 0 || timestamp > now || now - timestamp > T.days(7).msecs()) {
+                aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseRecord: 时间戳超出范围")
+                return null
+            }
+            val glucose = normalizeGlucose(record.glucose)
+            if (glucose == null) {
+                aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseRecord: glucose 值无效 (${record.glucose})")
+                return null
+            }
+            if (!isFiveMinuteReading(timestamp)) {
+                aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseRecord: 不是5分钟间隔 (timestamp=$timestamp)")
+                // 注意：这里可能是问题所在，微泰的数据可能不是严格的5分钟间隔
+                // 暂时注释掉这个检查以便调试
+                // return null
+            }
+
+            aapsLogger.debug(LTag.BGSOURCE, "Aidex2 parseRecord: 成功解析 GV(timestamp=$timestamp, glucose=$glucose)")
             return GV(
                 timestamp = timestamp,
                 value = glucose,

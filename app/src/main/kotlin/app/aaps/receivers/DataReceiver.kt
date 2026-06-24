@@ -45,6 +45,17 @@ open class DataReceiver : DaggerBroadcastReceiver() {
     fun processIntent(context: Context, intent: Intent) {
         val bundle = intent.extras ?: return
         aapsLogger.debug(LTag.CORE, "onReceive ${intent.action} ${BundleLogger.log(bundle)}")
+
+        // 详细日志：Aidex2 数据接收
+        if (intent.action == Intents.AIDEX2_CGM_DATA) {
+            aapsLogger.debug(LTag.CORE, "Aidex2 广播接收: action=${intent.action}")
+            aapsLogger.debug(LTag.CORE, "Aidex2 Bundle keys: ${bundle.keySet()}")
+            for (key in bundle.keySet()) {
+                val value = bundle.get(key)
+                aapsLogger.debug(LTag.CORE, "Aidex2 Bundle[$key] = $value (type: ${value?.javaClass?.simpleName})")
+            }
+        }
+
         when (intent.action) {
             Intents.ACTION_NEW_BG_ESTIMATE            ->
                 OneTimeWorkRequest.Builder(XdripSourcePlugin.XdripSourceWorker::class.java)
