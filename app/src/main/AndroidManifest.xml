@@ -27,6 +27,11 @@
     <!-- To receive data from Aidex -->
     <uses-permission android:name="com.microtechmd.cgms.aidex.permissions.RECEIVE_BG_ESTIMATE" />
 
+    <!-- To receive data from Aidex2 (微泰) -->
+    <uses-permission android:name="com.microtech.aidexx.broadcast.permission.RECEIVE_CGM_DATA"/>
+    <permission android:name="com.microtech.aidexx.broadcast.permission.RECEIVE_CGM_DATA"
+        android:protectionLevel="normal"/>
+
     <application
         android:name="app.aaps.MainApp"
         android:allowBackup="true"
